@@ -1,0 +1,64 @@
+{
+  "_comment": "Document Extractor Configuration",
+  "_description": "Centralized configuration for all extraction parameters",
+  "output_dir": "extracted_documents",
+  "extract_embedded_images": true,
+  "verbose_logging": false,
+  "ocr": {
+    "_comment": "OCR processing settings",
+    "dpi": 400,
+    "language": "eng+chi_sim+chi_tra",
+    "page_segmentation_mode": 3,
+    "ocr_engine_mode": 3,
+    "enable_preprocessing": true,
+    "low_confidence_threshold": 60,
+    "min_avg_confidence": 0.3,
+    "min_text_length": 10,
+    "min_scanned_page_text": 50
+  },
+  "image_detection": {
+    "_comment": "Computer vision image detection settings",
+    "min_area": 75000,
+    "min_width": 250,
+    "min_height": 250,
+    "max_aspect_ratio": 4.0,
+    "min_aspect_ratio": 0.25,
+    "canny_low_threshold": 100,
+    "canny_high_threshold": 200,
+    "variance_threshold": 1000,
+    "edge_density_min": 0.05,
+    "edge_density_max": 0.3,
+    "entropy_threshold": 6.0
+  },
+  "text_processing": {
+    "_comment": "Text quality assessment and processing",
+    "min_word_count": 10,
+    "min_text_length_quality": 20,
+    "optimal_text_length": 100,
+    "min_clean_char_ratio": 0.8
+  },
+  "martial_arts": {
+    "_comment": "Martial arts content detection settings",
+    "technique_relevance_weight": 0.3,
+    "chinese_relevance_weight": 1.0,
+    "keyword_relevance_weight": 0.1,
+    "min_chinese_ratio_multilingual": 0.1
+  },
+  "rag": {
+    "_comment": "RAG system optimization settings",
+    "target_chunk_size": 512,
+    "max_chunk_size": 600,
+    "min_chunk_size": 50,
+    "min_quality_score": 0.6,
+    "min_confidence_score": 0.7,
+    "max_low_confidence_regions": 2
+  },
+  "pdf": {
+    "_comment": "PDF-specific processing settings",
+    "heading_font_threshold": 14.0,
+    "large_heading_threshold": 18.0,
+    "medium_heading_threshold": 16.0,
+    "zoom_factor": 2.0,
+    "enable_table_extraction": true
+  }
+}

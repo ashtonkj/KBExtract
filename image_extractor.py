@@ -14,6 +14,9 @@ import cv2
 import numpy as np
 from dataclasses import dataclass, asdict
 
+# Import configuration system
+from extractor_config import ImageDetectionConfig
+
 @dataclass
 class ExtractedImage:
     """Structure for extracted images"""
@@ -28,53 +31,19 @@ class ExtractedImage:
 class ImageExtractor:
     """Standalone image extraction from page images"""
     
-    def __init__(self, output_dir: Path, 
-                 min_area: int = 75000,
-                 min_width: int = 250,
-                 min_height: int = 250,
-                 max_aspect_ratio: float = 4.0,
-                 min_aspect_ratio: float = 0.25,
-                 canny_low: int = 100,
-                 canny_high: int = 200,
-                 variance_threshold: int = 1000,
-                 edge_density_min: float = 0.05,
-                 edge_density_max: float = 0.3,
-                 entropy_threshold: float = 6.0,
-                 horizontal_line_threshold: float = 0.1):
+    def __init__(self, output_dir: Path, config: ImageDetectionConfig = None):
         """
-        Initialize the image extractor with configurable parameters.
+        Initialize the image extractor with configuration.
         
         Args:
             output_dir: Directory to save extracted images
-            min_area: Minimum area in pixels for detected regions
-            min_width: Minimum width in pixels
-            min_height: Minimum height in pixels
-            max_aspect_ratio: Maximum width/height ratio
-            min_aspect_ratio: Minimum width/height ratio
-            canny_low: Lower threshold for Canny edge detection
-            canny_high: Upper threshold for Canny edge detection
-            variance_threshold: Minimum pixel variance for image regions
-            edge_density_min: Minimum edge density for images
-            edge_density_max: Maximum edge density for images
-            entropy_threshold: Minimum entropy for image regions
-            horizontal_line_threshold: Maximum horizontal line density (text indicator)
+            config: ImageDetectionConfig instance, or None for default
         """
         self.output_dir = output_dir
         self.output_dir.mkdir(exist_ok=True)
         
-        # Detection parameters
-        self.min_area = min_area
-        self.min_width = min_width
-        self.min_height = min_height
-        self.max_aspect_ratio = max_aspect_ratio
-        self.min_aspect_ratio = min_aspect_ratio
-        self.canny_low = canny_low
-        self.canny_high = canny_high
-        self.variance_threshold = variance_threshold
-        self.edge_density_min = edge_density_min
-        self.edge_density_max = edge_density_max
-        self.entropy_threshold = entropy_threshold
-        self.horizontal_line_threshold = horizontal_line_threshold
+        # Use provided config or create default
+        self.config = config if config is not None else ImageDetectionConfig()
         
         # Setup logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -122,10 +91,11 @@ class ImageExtractor:
         
         try:
             # Edge detection with configurable parameters
-            edges = cv2.Canny(gray, self.canny_low, self.canny_high, apertureSize=3)
+            edges = cv2.Canny(gray, self.config.canny_low_threshold, self.config.canny_high_threshold, 
+                            apertureSize=self.config.canny_aperture_size)
             
             # Morphological operations to connect broken edges
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, self.config.morph_kernel_size)
             edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
             
             # Find contours
@@ -137,7 +107,7 @@ class ImageExtractor:
                 # Calculate area
                 area = cv2.contourArea(contour)
                 
-                if area < self.min_area:
+                if area < self.config.min_area:
                     continue
                 
                 # Get bounding rectangle
@@ -145,10 +115,10 @@ class ImageExtractor:
                 
                 # Apply size and aspect ratio filters
                 aspect_ratio = w / h
-                if (aspect_ratio > self.max_aspect_ratio or 
-                    aspect_ratio < self.min_aspect_ratio or 
-                    w < self.min_width or 
-                    h < self.min_height):
+                if (aspect_ratio > self.config.max_aspect_ratio or 
+                    aspect_ratio < self.config.min_aspect_ratio or 
+                    w < self.config.min_width or 
+                    h < self.config.min_height):
                     continue
                 
                 # Extract the region
@@ -196,7 +166,7 @@ class ImageExtractor:
             thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
             
             # Find connected components
-            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=self.config.connectivity)
             
             extracted_count = 0
             
@@ -204,7 +174,7 @@ class ImageExtractor:
                 x, y, w, h, area = stats[i]
                 
                 # Filter by size
-                if area < self.min_area or w < self.min_width or h < self.min_height:
+                if area < self.config.cc_min_area or w < self.config.min_width or h < self.config.min_height:
                     continue
                 
                 # Extract the region
@@ -265,7 +235,7 @@ class ImageExtractor:
         height, width = gray_roi.shape
         
         # Skip very small regions (already filtered, but double-check)
-        if height < self.min_height or width < self.min_width:
+        if height < self.config.min_height or width < self.config.min_width:
             return False
         
         # Calculate variance (images tend to have more variance than text)
@@ -283,11 +253,11 @@ class ImageExtractor:
         # Heuristic scoring
         image_score = 0
         
-        if variance > self.variance_threshold:
+        if variance > self.config.variance_threshold:
             image_score += 1
-        if self.edge_density_min < edge_density < self.edge_density_max:
+        if self.config.edge_density_min < edge_density < self.config.edge_density_max:
             image_score += 1
-        if entropy > self.entropy_threshold:
+        if entropy > self.config.entropy_threshold:
             image_score += 1
         
         # Additional check: look for text-like patterns
@@ -295,7 +265,7 @@ class ImageExtractor:
         horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
         horizontal_density = np.sum(horizontal_lines > 0) / (width * height)
         
-        if horizontal_density > self.horizontal_line_threshold:
+        if horizontal_density > self.config.horizontal_line_threshold:
             image_score -= 1
         
         return image_score >= 2
@@ -353,24 +323,65 @@ def main():
     parser.add_argument("-p", "--pattern", default="page_*.png", help="Glob pattern for page images")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     
-    # Image detection parameters
-    parser.add_argument("--min-area", type=int, default=75000, help="Minimum area in pixels")
-    parser.add_argument("--min-width", type=int, default=250, help="Minimum width in pixels")
-    parser.add_argument("--min-height", type=int, default=250, help="Minimum height in pixels")
-    parser.add_argument("--max-aspect-ratio", type=float, default=4.0, help="Maximum aspect ratio")
-    parser.add_argument("--min-aspect-ratio", type=float, default=0.25, help="Minimum aspect ratio")
-    parser.add_argument("--canny-low", type=int, default=100, help="Lower Canny threshold")
-    parser.add_argument("--canny-high", type=int, default=200, help="Upper Canny threshold")
-    parser.add_argument("--variance-threshold", type=int, default=1000, help="Minimum pixel variance")
-    parser.add_argument("--edge-density-min", type=float, default=0.05, help="Minimum edge density")
-    parser.add_argument("--edge-density-max", type=float, default=0.3, help="Maximum edge density")
-    parser.add_argument("--entropy-threshold", type=float, default=6.0, help="Minimum entropy")
-    parser.add_argument("--horizontal-line-threshold", type=float, default=0.1, help="Max horizontal line density")
+    # Configuration options
+    parser.add_argument("--config", type=str, help="Path to configuration JSON file (image_detection section)")
+    
+    # Image detection parameters (for backward compatibility)
+    parser.add_argument("--min-area", type=int, help="Minimum area in pixels")
+    parser.add_argument("--min-width", type=int, help="Minimum width in pixels")
+    parser.add_argument("--min-height", type=int, help="Minimum height in pixels")
+    parser.add_argument("--max-aspect-ratio", type=float, help="Maximum aspect ratio")
+    parser.add_argument("--min-aspect-ratio", type=float, help="Minimum aspect ratio")
+    parser.add_argument("--canny-low", type=int, help="Lower Canny threshold")
+    parser.add_argument("--canny-high", type=int, help="Upper Canny threshold")
+    parser.add_argument("--variance-threshold", type=int, help="Minimum pixel variance")
+    parser.add_argument("--edge-density-min", type=float, help="Minimum edge density")
+    parser.add_argument("--edge-density-max", type=float, help="Maximum edge density")
+    parser.add_argument("--entropy-threshold", type=float, help="Minimum entropy")
+    parser.add_argument("--horizontal-line-threshold", type=float, help="Max horizontal line density")
     
     args = parser.parse_args()
     
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Load configuration
+    if args.config:
+        try:
+            from extractor_config import DocumentExtractorConfig
+            full_config = DocumentExtractorConfig.from_file(Path(args.config))
+            config = full_config.image_detection
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return 1
+    else:
+        config = ImageDetectionConfig()
+    
+    # Apply CLI overrides
+    if args.min_area:
+        config.min_area = args.min_area
+    if args.min_width:
+        config.min_width = args.min_width
+    if args.min_height:
+        config.min_height = args.min_height
+    if args.max_aspect_ratio:
+        config.max_aspect_ratio = args.max_aspect_ratio
+    if args.min_aspect_ratio:
+        config.min_aspect_ratio = args.min_aspect_ratio
+    if args.canny_low:
+        config.canny_low_threshold = args.canny_low
+    if args.canny_high:
+        config.canny_high_threshold = args.canny_high
+    if args.variance_threshold:
+        config.variance_threshold = args.variance_threshold
+    if args.edge_density_min:
+        config.edge_density_min = args.edge_density_min
+    if args.edge_density_max:
+        config.edge_density_max = args.edge_density_max
+    if args.entropy_threshold:
+        config.entropy_threshold = args.entropy_threshold
+    if args.horizontal_line_threshold:
+        config.horizontal_line_threshold = args.horizontal_line_threshold
     
     # Set up paths
     input_dir = Path(args.input_dir)
@@ -380,22 +391,8 @@ def main():
     
     output_dir = Path(args.output) if args.output else input_dir / "extracted_images"
     
-    # Initialize extractor with custom parameters
-    extractor = ImageExtractor(
-        output_dir=output_dir,
-        min_area=args.min_area,
-        min_width=args.min_width,
-        min_height=args.min_height,
-        max_aspect_ratio=args.max_aspect_ratio,
-        min_aspect_ratio=args.min_aspect_ratio,
-        canny_low=args.canny_low,
-        canny_high=args.canny_high,
-        variance_threshold=args.variance_threshold,
-        edge_density_min=args.edge_density_min,
-        edge_density_max=args.edge_density_max,
-        entropy_threshold=args.entropy_threshold,
-        horizontal_line_threshold=args.horizontal_line_threshold
-    )
+    # Initialize extractor with configuration
+    extractor = ImageExtractor(output_dir=output_dir, config=config)
     
     # Process all images
     extracted_images = extractor.process_directory(input_dir, args.pattern)

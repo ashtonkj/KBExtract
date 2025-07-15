@@ -49,6 +49,9 @@ import re
 import shutil
 from datetime import datetime
 
+# Configuration system
+from extractor_config import DocumentExtractorConfig, load_config
+
 @dataclass
 class ExtractedContent:
     """Structure for extracted content with RAG optimization"""
@@ -111,17 +114,39 @@ class DocumentStructure:
 class DocumentExtractor:
     """Main document extraction class"""
     
-    def __init__(self, output_dir: str = "extracted_documents", extract_embedded_images: bool = True, 
-                 ocr_preprocessing: bool = True, ocr_dpi: int = 400, ocr_lang: str = 'eng+chi_sim+chi_tra',
-                 ocr_psm: int = 3, ocr_oem: int = 3):
-        self.output_dir = Path(output_dir)
+    def __init__(self, config: Optional[DocumentExtractorConfig] = None, **kwargs):
+        """
+        Initialize DocumentExtractor with configuration.
+        
+        Args:
+            config: DocumentExtractorConfig instance, or None for default
+            **kwargs: Override specific config values (for backward compatibility)
+        """
+        # Load configuration
+        if config is None:
+            self.config = DocumentExtractorConfig()
+        else:
+            self.config = config
+        
+        # Apply any kwargs overrides for backward compatibility
+        if 'output_dir' in kwargs:
+            self.config.output_dir = kwargs['output_dir']
+        if 'extract_embedded_images' in kwargs:
+            self.config.extract_embedded_images = kwargs['extract_embedded_images']
+        if 'ocr_preprocessing' in kwargs:
+            self.config.ocr.enable_preprocessing = not kwargs.get('no_ocr_preprocessing', False)
+        if 'ocr_dpi' in kwargs:
+            self.config.ocr.dpi = kwargs['ocr_dpi']
+        if 'ocr_lang' in kwargs:
+            self.config.ocr.language = kwargs['ocr_lang']
+        if 'ocr_psm' in kwargs:
+            self.config.ocr.page_segmentation_mode = kwargs['ocr_psm']
+        if 'ocr_oem' in kwargs:
+            self.config.ocr.ocr_engine_mode = kwargs['ocr_oem']
+        
+        # Setup paths and logging
+        self.output_dir = Path(self.config.output_dir)
         self.output_dir.mkdir(exist_ok=True)
-        self.extract_embedded_images = extract_embedded_images
-        self.ocr_preprocessing = ocr_preprocessing
-        self.ocr_dpi = ocr_dpi
-        self.ocr_lang = ocr_lang
-        self.ocr_psm = ocr_psm
-        self.ocr_oem = ocr_oem
         
         # Setup logging
         logging.basicConfig(
@@ -196,7 +221,7 @@ class DocumentExtractor:
             extracted_text = self._process_pdf_page_structure(text_dict, page_num + 1, doc_structure)
             
             # Check if this is a scanned page (little to no extractable text)
-            is_scanned_page = len(extracted_text.strip()) < 50  # Heuristic for scanned pages
+            is_scanned_page = len(extracted_text.strip()) < self.config.ocr.min_scanned_page_text
             
             # Extract images
             image_list = page.get_images()
@@ -204,11 +229,12 @@ class DocumentExtractor:
                 self._extract_pdf_image(pdf_doc, img, page_num + 1, img_index, images_dir, doc_structure)
             
             # If this appears to be a scanned page, convert to image and apply OCR + image extraction
-            if is_scanned_page and self.extract_embedded_images:
+            if is_scanned_page and self.config.extract_embedded_images:
                 self.logger.info(f"Detected scanned PDF page {page_num + 1}, applying OCR and image extraction")
                 try:
                     # Convert page to image
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
+                    zoom = self.config.pdf.zoom_factor
+                    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
                     page_img_path = images_dir / f"page_{page_num + 1:03d}_ocr.png"
                     pix.save(str(page_img_path))
                     
@@ -279,9 +305,11 @@ class DocumentExtractor:
     def _classify_pdf_content(self, text: str, font_size: float) -> str:
         """Classify content type based on text and formatting"""
         # Simple heuristics - can be enhanced
-        if font_size > 14:
+        if font_size > self.config.pdf.heading_font_threshold:
             return "heading"
-        elif len(text) < 100 and text.isupper():
+        elif (len(text) < self.config.pdf.caption_max_length and 
+              text.isupper() and 
+              len(text.upper()) / len(text) > self.config.pdf.uppercase_heading_threshold):
             return "heading"
         elif text.startswith(("Figure", "Table", "Image")):
             return "caption"
@@ -290,11 +318,11 @@ class DocumentExtractor:
     
     def _determine_heading_level(self, font_size: float) -> int:
         """Determine heading level based on font size"""
-        if font_size > 18:
+        if font_size > self.config.pdf.large_heading_threshold:
             return 1
-        elif font_size > 16:
+        elif font_size > self.config.pdf.medium_heading_threshold:
             return 2
-        elif font_size > 14:
+        elif font_size > self.config.pdf.small_heading_threshold:
             return 3
         else:
             return 4
@@ -752,7 +780,7 @@ class DocumentExtractor:
         
         return doc_structure
     
-    def _detect_and_extract_images_from_page(self, page_image_path: Path, page_num: int, images_dir: Path, doc_structure: DocumentStructure, min_area: int = 75000):
+    def _detect_and_extract_images_from_page(self, page_image_path: Path, page_num: int, images_dir: Path, doc_structure: DocumentStructure):
         """
         Detect and extract images from a page using computer vision.
         
@@ -761,7 +789,6 @@ class DocumentExtractor:
             page_num: Page number
             images_dir: Directory to save extracted images
             doc_structure: Document structure to add images to
-            min_area: Minimum area for detected images (pixels)
         """
         try:
             # Read the page image
@@ -772,11 +799,14 @@ class DocumentExtractor:
             # Convert to grayscale for processing
             gray = cv2.cvtColor(page_img, cv2.COLOR_BGR2GRAY)
             
-            # Method 1: Edge detection to find rectangular regions (more conservative parameters)
-            edges = cv2.Canny(gray, 100, 200, apertureSize=3)
+            # Method 1: Edge detection to find rectangular regions
+            edges = cv2.Canny(gray, 
+                            self.config.image_detection.canny_low_threshold,
+                            self.config.image_detection.canny_high_threshold, 
+                            apertureSize=self.config.image_detection.canny_aperture_size)
             
             # Use morphological operations to connect broken edges
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, self.config.image_detection.morph_kernel_size)
             edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
             
             # Find contours
@@ -788,7 +818,7 @@ class DocumentExtractor:
                 # Calculate area
                 area = cv2.contourArea(contour)
                 
-                if area < min_area:
+                if area < self.config.image_detection.min_area:
                     continue
                 
                 # Get bounding rectangle
@@ -796,7 +826,10 @@ class DocumentExtractor:
                 
                 # Filter out very thin rectangles (likely text lines) and very small regions
                 aspect_ratio = w / h
-                if aspect_ratio > 4 or aspect_ratio < 0.25 or w < 250 or h < 250:
+                if (aspect_ratio > self.config.image_detection.max_aspect_ratio or 
+                    aspect_ratio < self.config.image_detection.min_aspect_ratio or 
+                    w < self.config.image_detection.min_width or 
+                    h < self.config.image_detection.min_height):
                     continue
                 
                 # Extract the region
@@ -835,13 +868,12 @@ class DocumentExtractor:
         except Exception as e:
             self.logger.warning(f"Image extraction failed for page {page_num}: {e}")
     
-    def _is_likely_image_region(self, roi: np.ndarray, text_threshold: float = 0.7) -> bool:
+    def _is_likely_image_region(self, roi: np.ndarray) -> bool:
         """
         Determine if a region is likely an image rather than text.
         
         Args:
             roi: Region of interest (image patch)
-            text_threshold: Threshold for text-like characteristics
             
         Returns:
             True if likely an image, False if likely text
@@ -859,7 +891,8 @@ class DocumentExtractor:
         height, width = gray_roi.shape
         
         # Skip very small regions
-        if height < 250 or width < 250:
+        if (height < self.config.image_detection.min_height or 
+            width < self.config.image_detection.min_width):
             return False
         
         # Calculate variance (images tend to have more variance than text)
@@ -874,15 +907,15 @@ class DocumentExtractor:
         hist_norm = hist / np.sum(hist)
         entropy = -np.sum(hist_norm * np.log2(hist_norm + 1e-10))
         
-        # Heuristic scoring
-        # High variance, moderate edge density, and high entropy suggest an image
+        # Heuristic scoring using config values
         image_score = 0
         
-        if variance > 1000:  # Images typically have higher variance
+        if variance > self.config.image_detection.variance_threshold:
             image_score += 1
-        if 0.05 < edge_density < 0.3:  # Moderate edge density
+        if (self.config.image_detection.edge_density_min < edge_density < 
+            self.config.image_detection.edge_density_max):
             image_score += 1
-        if entropy > 6:  # High entropy suggests diverse pixel values
+        if entropy > self.config.image_detection.entropy_threshold:
             image_score += 1
         
         # Additional check: look for text-like patterns
@@ -891,7 +924,7 @@ class DocumentExtractor:
         horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
         horizontal_density = np.sum(horizontal_lines > 0) / (width * height)
         
-        if horizontal_density > 0.1:  # Lots of horizontal lines suggest text
+        if horizontal_density > self.config.image_detection.horizontal_line_threshold:
             image_score -= 1
         
         return image_score >= 2
@@ -908,15 +941,18 @@ class DocumentExtractor:
             thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
             
             # Find connected components that might be images
-            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                thresh, connectivity=self.config.image_detection.connectivity)
             
             extracted_count = start_count
             
             for i in range(1, num_labels):  # Skip background (label 0)
                 x, y, w, h, area = stats[i]
                 
-                # Filter by size (more conservative)
-                if area < 60000 or w < 250 or h < 250:
+                # Filter by size using config values
+                if (area < self.config.image_detection.cc_min_area or 
+                    w < self.config.image_detection.min_width or 
+                    h < self.config.image_detection.min_height):
                     continue
                 
                 # Extract the region
@@ -962,7 +998,7 @@ class DocumentExtractor:
         Returns:
             Path to the preprocessed image
         """
-        if not self.ocr_preprocessing:
+        if not self.config.ocr.enable_preprocessing:
             return image_path
             
         try:
@@ -975,26 +1011,26 @@ class DocumentExtractor:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
             # Apply Gaussian blur to reduce noise
-            blurred = cv2.GaussianBlur(gray, (1, 1), 0)
+            blurred = cv2.GaussianBlur(gray, self.config.ocr.gaussian_blur_kernel, 0)
             
             # Apply adaptive thresholding for better text contrast
-            # This works better than simple thresholding for documents with varying lighting
             thresh = cv2.adaptiveThreshold(
                 blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                cv2.THRESH_BINARY, 11, 2
+                cv2.THRESH_BINARY, 
+                self.config.ocr.adaptive_threshold_block_size, 
+                self.config.ocr.adaptive_threshold_c
             )
             
             # Morphological operations to clean up the image
-            # Remove small noise and connect broken characters
-            kernel = np.ones((1, 1), np.uint8)
+            kernel = np.ones(self.config.ocr.morphology_kernel_size, np.uint8)
             cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
             cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
             
             # Resize image for better OCR (if DPI is specified)
-            if self.ocr_dpi != 300:  # Default is 300 DPI
+            if self.config.ocr.dpi != 300:  # Default is 300 DPI
                 height, width = cleaned.shape
                 # Scale factor based on DPI
-                scale_factor = self.ocr_dpi / 300.0
+                scale_factor = self.config.ocr.dpi / 300.0
                 new_width = int(width * scale_factor)
                 new_height = int(height * scale_factor)
                 cleaned = cv2.resize(cleaned, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
@@ -1024,11 +1060,11 @@ class DocumentExtractor:
             processed_image_path = self._preprocess_image_for_ocr(image_path)
             
             # Configure Tesseract with custom settings
-            custom_config = f'--oem {self.ocr_oem} --psm {self.ocr_psm} -l {self.ocr_lang}'
+            custom_config = f'--oem {self.config.ocr.ocr_engine_mode} --psm {self.config.ocr.page_segmentation_mode} -l {self.config.ocr.language}'
             
             # Additional OCR configuration for better accuracy
-            if self.ocr_dpi != 300:
-                custom_config += f' --dpi {self.ocr_dpi}'
+            if self.config.ocr.dpi != 300:
+                custom_config += f' --dpi {self.config.ocr.dpi}'
             
             # Perform OCR
             raw_ocr_text = pytesseract.image_to_string(
@@ -1058,7 +1094,7 @@ class DocumentExtractor:
         except Exception as e:
             self.logger.warning(f"Enhanced OCR failed for {image_path}, falling back to basic OCR: {e}")
             # Fallback to basic OCR
-            raw_text = pytesseract.image_to_string(Image.open(image_path), lang=self.ocr_lang)
+            raw_text = pytesseract.image_to_string(Image.open(image_path), lang=self.config.ocr.language)
             return self._post_process_ocr_text(raw_text, None)
     
     def _post_process_ocr_text(self, raw_text: str, confidence_data: Optional[Dict] = None) -> Dict[str, Any]:
@@ -1077,8 +1113,8 @@ class DocumentExtractor:
             r'\brn\b': 'm',              # common OCR error: rn -> m
             r'\bcl\b': 'd',              # cl misread as d
             r'\bli\b': 'h',              # li misread as h
-            r'(\w)\1{3,}': r'\1\1',      # reduce excessive character repetition
-            r'\s{3,}': ' ',              # normalize excessive whitespace
+            rf'(\w)\1{{{self.config.text_processing.max_char_repetition},}}': r'\1\1',  # reduce excessive repetition
+            rf'\s{{{self.config.text_processing.excessive_whitespace_threshold},}}': ' ',  # normalize whitespace
             r'[^\w\s\u4e00-\u9fff.,;:!?()"\'-]': '',  # remove garbage characters but keep Chinese
         }
         
@@ -1102,7 +1138,7 @@ class DocumentExtractor:
                     word_confidences = confidence_data['conf']
                     
                     for word, conf in zip(words, word_confidences):
-                        if word.strip() and int(conf) < 60:  # less than 60% confidence
+                        if word.strip() and int(conf) < self.config.ocr.low_confidence_threshold:
                             low_confidence_regions.append(word.strip())
             except Exception as e:
                 self.logger.debug(f"Could not process confidence data: {e}")
@@ -1131,16 +1167,8 @@ class DocumentExtractor:
         Returns:
             Dictionary with martial arts content analysis
         """
-        # Common martial arts patterns - keep broad to avoid false negatives
-        technique_patterns = [
-            r'[A-Z][a-z]+ [A-Z][a-z]+ (?:Fist|Palm|Kick|Strike|Stance|Step|Form|Block)',
-            r'(?:Taolu|Kata|Form|Set|Routine) \d+',
-            r'(?:Sifu|Shifu|Master|Sensei|Laoshi) [A-Z][a-z]+',
-            r'(?:Stance|Step|Position|Guard): [A-Z][a-z]+',
-            r'(?:Shaolin|Wudang|Tai Chi|Kung Fu|Gong Fu|Qi Gong|Nei Gong)',
-            r'(?:Dan Tian|Meridian|Qi|Chi|Jin|Li|Jing)',
-            r'(?:Eight|Five|Seven|Nine|Ten|Twelve) .{1,20}(?:Animals|Elements|Stars|Palms|Fists)',
-        ]
+        # Use technique patterns from config
+        technique_patterns = self.config.martial_arts.technique_patterns
         
         detected_techniques = []
         for pattern in technique_patterns:
@@ -1155,13 +1183,8 @@ class DocumentExtractor:
         total_chars = len(text.replace(' ', ''))  # exclude spaces from count
         chinese_ratio = chinese_chars / total_chars if total_chars > 0 else 0
         
-        # Additional martial arts indicators
-        martial_arts_keywords = [
-            'martial', 'arts', 'kungfu', 'kung fu', 'taichi', 'tai chi', 'qigong', 'qi gong',
-            'shaolin', 'wudang', 'internal', 'external', 'power', 'energy', 'meditation',
-            'breathing', 'posture', 'movement', 'technique', 'application', 'training',
-            'practice', 'master', 'student', 'lineage', 'tradition', 'ancient', 'classical'
-        ]
+        # Use martial arts keywords from config
+        martial_arts_keywords = self.config.martial_arts.martial_arts_keywords
         
         keyword_count = sum(1 for keyword in martial_arts_keywords if keyword.lower() in text.lower())
         
@@ -1170,7 +1193,10 @@ class DocumentExtractor:
             'chinese_ratio': chinese_ratio,
             'has_techniques': len(detected_techniques) > 0,
             'keyword_density': keyword_count / len(text.split()) if text.split() else 0,
-            'content_relevance': min(1.0, (len(detected_techniques) * 0.3 + chinese_ratio + keyword_count * 0.1))
+            'content_relevance': min(1.0, (
+                len(detected_techniques) * self.config.martial_arts.technique_relevance_weight + 
+                chinese_ratio * self.config.martial_arts.chinese_relevance_weight + 
+                keyword_count * self.config.martial_arts.keyword_relevance_weight))
         }
     
     def _calculate_text_quality(self, text: str, confidence_score: float) -> float:
@@ -1184,29 +1210,31 @@ class DocumentExtractor:
         Returns:
             Quality score (0-1)
         """
-        if not text or len(text.strip()) < 10:
+        if not text or len(text.strip()) < self.config.text_processing.min_text_length_quality:
             return 0.0
         
         score = confidence_score
         
         # Length scoring (prefer substantial content)
         text_length = len(text.strip())
-        if text_length < 20:
+        if text_length < self.config.text_processing.min_text_length_quality:
             score *= 0.5
-        elif text_length > 100:
-            score = min(1.0, score * 1.1)
+        elif text_length > self.config.text_processing.optimal_text_length:
+            score = min(1.0, score * self.config.text_processing.quality_length_bonus)
         
         # Character quality (penalize excessive special characters)
         clean_chars = len(re.findall(r'[\w\s\u4e00-\u9fff.,;:!?()"\'-]', text))
         char_quality = clean_chars / len(text) if text else 0
-        score *= char_quality
+        if char_quality < self.config.text_processing.min_clean_char_ratio:
+            score *= char_quality
         
         # Readability (prefer balanced whitespace)
         words = text.split()
         if words:
             avg_word_length = sum(len(word) for word in words) / len(words)
-            if 2 <= avg_word_length <= 15:  # reasonable word lengths
-                score = min(1.0, score * 1.05)
+            if (self.config.text_processing.min_reasonable_word_length <= avg_word_length <= 
+                self.config.text_processing.max_reasonable_word_length):
+                score = min(1.0, score * self.config.text_processing.word_length_bonus)
         
         return max(0.0, min(1.0, score))
     
@@ -1291,9 +1319,9 @@ class DocumentExtractor:
             
             # Chunk at natural boundaries
             should_chunk = (
-                len(chunk_text) > 512 or  # size threshold
+                len(chunk_text) > self.config.rag.target_chunk_size or  # size threshold
                 content.content_type == "table" or  # tables are standalone
-                (content.content_type == "paragraph" and len(chunk_text) > 300 and 
+                (content.content_type == "paragraph" and len(chunk_text) > self.config.rag.technique_chunk_threshold and 
                  hasattr(content, 'technique_mentions') and content.technique_mentions)  # technique descriptions
             )
             
@@ -1500,14 +1528,15 @@ class DocumentExtractor:
         # Filter high-quality content for embeddings
         high_quality_chunks = [
             chunk for chunk in rag_chunks 
-            if chunk.get('quality_score', 0) > 0.6 and chunk.get('word_count', 0) > 10
+            if (chunk.get('quality_score', 0) > self.config.rag.min_quality_score and 
+                chunk.get('word_count', 0) > self.config.rag.min_chunk_size)
         ]
         
         # Extract content needing review
         review_needed = [
             chunk for chunk in rag_chunks
-            if (chunk.get('confidence_score', 1) < 0.7 or 
-                len(chunk.get('low_confidence_regions', [])) > 2)
+            if (chunk.get('confidence_score', 1) < self.config.rag.min_confidence_score or 
+                len(chunk.get('low_confidence_regions', [])) > self.config.rag.max_low_confidence_regions)
         ]
         
         # Build technique index
@@ -1617,35 +1646,68 @@ def main():
     """Main CLI function"""
     parser = argparse.ArgumentParser(description="Extract text and images from various document formats")
     parser.add_argument("input_path", help="Path to document file or directory")
-    parser.add_argument("-o", "--output", default="extracted_documents", help="Output directory")
+    parser.add_argument("-o", "--output", help="Output directory")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--no-embedded-images", action="store_true", help="Disable computer vision-based image extraction from pages")
+    
+    # Configuration options
+    parser.add_argument("--config", type=str, help="Path to configuration JSON file")
+    parser.add_argument("--create-config", type=str, help="Create example configuration file at specified path")
     
     # RAG optimization options
     parser.add_argument("--rag-mode", action="store_true", help="Enable RAG-optimized output with chunking and post-processing")
     
-    # OCR enhancement options
+    # OCR enhancement options (for backward compatibility)
     parser.add_argument("--no-ocr-preprocessing", action="store_true", help="Disable OCR image preprocessing")
-    parser.add_argument("--ocr-dpi", type=int, default=400, help="OCR processing DPI (default: 400)")
-    parser.add_argument("--ocr-lang", default="eng+chi_sim+chi_tra", help="OCR language (default: eng+chi_sim+chi_tra)")
-    parser.add_argument("--ocr-psm", type=int, default=3, help="OCR page segmentation mode (default: 3)")
-    parser.add_argument("--ocr-oem", type=int, default=3, help="OCR engine mode (default: 3)")
+    parser.add_argument("--ocr-dpi", type=int, help="OCR processing DPI")
+    parser.add_argument("--ocr-lang", help="OCR language")
+    parser.add_argument("--ocr-psm", type=int, help="OCR page segmentation mode")
+    parser.add_argument("--ocr-oem", type=int, help="OCR engine mode")
     
     args = parser.parse_args()
     
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Handle config creation
+    if args.create_config:
+        config = DocumentExtractorConfig()
+        config.create_example_config(Path(args.create_config))
+        print(f"Created example configuration file at: {args.create_config}")
+        return
     
-    # Initialize extractor
-    extractor = DocumentExtractor(
-        output_dir=args.output, 
-        extract_embedded_images=not args.no_embedded_images,
-        ocr_preprocessing=not args.no_ocr_preprocessing,
-        ocr_dpi=args.ocr_dpi,
-        ocr_lang=args.ocr_lang,
-        ocr_psm=args.ocr_psm,
-        ocr_oem=args.ocr_oem
-    )
+    # Load configuration
+    if args.config:
+        config = load_config(Path(args.config))
+    else:
+        config = DocumentExtractorConfig()
+    
+    # Apply CLI overrides
+    if args.output:
+        config.output_dir = args.output
+    if args.verbose:
+        config.verbose_logging = True
+        logging.getLogger().setLevel(logging.DEBUG)
+    if args.no_embedded_images:
+        config.extract_embedded_images = False
+    if args.no_ocr_preprocessing:
+        config.ocr.enable_preprocessing = False
+    if args.ocr_dpi:
+        config.ocr.dpi = args.ocr_dpi
+    if args.ocr_lang:
+        config.ocr.language = args.ocr_lang
+    if args.ocr_psm:
+        config.ocr.page_segmentation_mode = args.ocr_psm
+    if args.ocr_oem:
+        config.ocr.ocr_engine_mode = args.ocr_oem
+    
+    # Validate configuration
+    issues = config.validate()
+    if issues:
+        print("Configuration validation errors:")
+        for issue in issues:
+            print(f"  - {issue}")
+        return
+    
+    # Initialize extractor with configuration
+    extractor = DocumentExtractor(config=config)
     
     input_path = Path(args.input_path)
     

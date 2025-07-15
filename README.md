@@ -93,6 +93,15 @@ python3 document_extractor.py "/path/to/document.pdf" -v
 python3 document_extractor.py "/path/to/document.pdf" --rag-mode
 ```
 
+#### Using configuration files:
+```bash
+# Create an example configuration file
+python3 document_extractor.py --create-config my_config.json
+
+# Use configuration file
+python3 document_extractor.py "/path/to/document.pdf" --config my_config.json
+```
+
 #### Disable computer vision image extraction:
 ```bash
 python3 document_extractor.py "/path/to/document.pdf" --no-embedded-images
@@ -147,6 +156,125 @@ extractor.save_structure(doc_structure, Path("output/document_name"))
 
 # Save with RAG optimization (recommended for knowledge bases)
 extractor.save_structure_for_rag(doc_structure, Path("output/document_name"))
+```
+
+## Configuration System
+
+The document extractor now uses a centralized configuration system that eliminates magic numbers and provides clear documentation for all parameters.
+
+### Creating Configuration Files
+
+Generate an example configuration file with all available options:
+
+```bash
+python3 document_extractor.py --create-config my_config.json
+```
+
+This creates a JSON file with all configuration options and their default values:
+
+```json
+{
+  "_comment": "Document Extractor Configuration",
+  "output_dir": "extracted_documents",
+  "extract_embedded_images": true,
+  "verbose_logging": false,
+  
+  "ocr": {
+    "_comment": "OCR processing settings",
+    "dpi": 400,
+    "language": "eng+chi_sim+chi_tra",
+    "page_segmentation_mode": 3,
+    "low_confidence_threshold": 60
+  },
+  
+  "image_detection": {
+    "_comment": "Computer vision image detection settings",
+    "min_area": 75000,
+    "min_width": 250,
+    "min_height": 250,
+    "canny_low_threshold": 100,
+    "canny_high_threshold": 200
+  },
+  
+  "rag": {
+    "_comment": "RAG system optimization settings",
+    "target_chunk_size": 512,
+    "min_quality_score": 0.6,
+    "min_confidence_score": 0.7
+  }
+}
+```
+
+### Using Configuration Files
+
+```bash
+# Use configuration file
+python3 document_extractor.py document.pdf --config my_config.json
+
+# Override specific values via CLI
+python3 document_extractor.py document.pdf --config my_config.json --ocr-dpi 600
+```
+
+### Configuration Categories
+
+#### OCR Settings (`ocr`)
+- **dpi**: OCR processing resolution (72-1200)
+- **language**: Tesseract language codes
+- **page_segmentation_mode**: Text layout analysis mode (0-13)
+- **low_confidence_threshold**: Words below this flagged for review (0-100)
+- **enable_preprocessing**: Apply image enhancement before OCR
+
+#### Image Detection (`image_detection`)
+- **min_area**: Minimum pixel area for detected images
+- **min_width/min_height**: Minimum dimensions in pixels
+- **canny_low/high_threshold**: Edge detection sensitivity
+- **variance_threshold**: Minimum pixel variance for images
+- **edge_density_min/max**: Edge density range for image classification
+
+#### RAG Optimization (`rag`)
+- **target_chunk_size**: Target tokens per chunk (for embeddings)
+- **min_quality_score**: Minimum quality for embedding chunks (0-1)
+- **min_confidence_score**: Minimum OCR confidence for high-quality chunks (0-1)
+- **max_low_confidence_regions**: Max uncertain words before flagging for review
+
+#### Martial Arts Detection (`martial_arts`)
+- **technique_relevance_weight**: Weight for technique mentions in scoring
+- **chinese_relevance_weight**: Weight for Chinese character ratio
+- **technique_patterns**: Regex patterns for technique detection
+
+#### Text Processing (`text_processing`)
+- **min_clean_char_ratio**: Minimum ratio of valid characters (0-1)
+- **optimal_text_length**: Text length that gets quality bonus
+- **max_char_repetition**: Maximum allowed character repetition
+
+### Python API with Configuration
+
+```python
+from extractor_config import DocumentExtractorConfig
+
+# Load from file
+config = DocumentExtractorConfig.from_file("my_config.json")
+
+# Create custom configuration
+config = DocumentExtractorConfig()
+config.ocr.dpi = 600
+config.image_detection.min_area = 50000
+config.rag.target_chunk_size = 256
+
+# Use with extractor
+extractor = DocumentExtractor(config=config)
+```
+
+### Validation
+
+The configuration system includes validation to catch common errors:
+
+```bash
+# If you set invalid values, you'll get helpful error messages
+# Configuration validation errors:
+#   - OCR DPI should be between 72 and 1200
+#   - Minimum aspect ratio should be less than maximum aspect ratio
+#   - Quality score should be between 0 and 1
 ```
 
 ## Output Structure
