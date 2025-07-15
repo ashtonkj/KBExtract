@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(./install_dependencies.sh:*)",
+      "Bash(python3 -m pip install:*)",
+      "Bash(python3:*)",
+      "Bash(hash -r)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(source:*)"
+    ],
+    "deny": []
+  }
+}
